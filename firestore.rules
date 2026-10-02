@@ -1,0 +1,212 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function isOwner(ownerId) { return signedIn() && request.auth.uid == ownerId; }
+    function me() { return get(/databases/$(database)/documents/users/$(request.auth.uid)).data; }
+    function isSchoolAdmin(schoolId) {
+      return signedIn() && schoolId != null
+        && me().get('role', null) == 'school-admin'
+        && me().get('schoolId', null) == schoolId;
+    }
+    function classDoc(classId) { return get(/databases/$(database)/documents/classes/$(classId)).data; }
+    function codeDoc(code) { return get(/databases/$(database)/documents/teacherCodes/$(code)).data; }
+
+    match /users/{uid} {
+      // Staff roles require an active access code whose role and school match the profile.
+      function validRole(d) {
+        return !(d.get('role', null) in ['teacher', 'school-admin'])
+          || (d.get('teacherCode', null) is string
+              && codeDoc(d.teacherCode).active == true
+              && codeDoc(d.teacherCode).get('role', 'teacher') == d.role
+              && codeDoc(d.teacherCode).get('schoolId', null) == d.get('schoolId', null));
+      }
+      // A student's tier is free to set the first time; afterwards it needs the teacher's approval.
+      function tierChangeAllowed() {
+        let before = resource.data.get('ageTier', null);
+        let after = request.resource.data.get('ageTier', null);
+        let req = /databases/$(database)/documents/levelRequests/$(uid);
+        return after == before
+          || before == null
+          || request.resource.data.get('role', null) in ['teacher', 'school-admin']
+          || (exists(req) && get(req).data.status == 'approved' && get(req).data.to == after);
+      }
+      // `hasPin` is only set by the server (Cloud Functions) when a PIN is stored.
+      allow read: if isOwner(uid);
+      allow create: if isOwner(uid) && validRole(request.resource.data)
+        && request.resource.data.get('hasPin', false) == false;
+      allow update: if isOwner(uid) && validRole(request.resource.data) && tierChangeAllowed()
+        && request.resource.data.get('hasPin', false) == resource.data.get('hasPin', false);
+    }
+
+    // School-admin codes are created in the console; school admins create teacher codes for their school.
+    match /teacherCodes/{code} {
+      allow get: if signedIn();
+      allow list: if isSchoolAdmin(resource.data.get('schoolId', null));
+      allow create: if isSchoolAdmin(request.resource.data.schoolId)
+        && request.resource.data.role == 'teacher'
+        && request.resource.data.code == code;
+      allow update: if isSchoolAdmin(resource.data.get('schoolId', null))
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['active']);
+      allow delete: if false;
+    }
+
+    // Schools are created by the platform admin in the console; the school admin records parental consent.
+    match /schools/{schoolId} {
+      allow read: if signedIn();
+      allow create, delete: if false;
+      allow update: if isSchoolAdmin(schoolId)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['consent'])
+        && (request.resource.data.consent == null || request.resource.data.consent.confirmedBy == request.auth.uid);
+
+      match /staff/{uid} {
+        allow read: if isOwner(uid) || isSchoolAdmin(schoolId);
+        allow create, update: if isOwner(uid)
+          && request.resource.data.uid == uid
+          && me().get('schoolId', null) == schoolId;
+        allow delete: if isSchoolAdmin(schoolId);
+      }
+    }
+
+    // Staff moving or removing a student; the student's app applies it, then deletes it.
+    match /assignments/{uid} {
+      function canMove(d) {
+        return d.to != null
+          && isSchoolAdmin(d.to.schoolId)
+          && classDoc(d.to.classId).get('schoolId', null) == d.to.schoolId;
+      }
+      function canRemove(d) {
+        return d.to == null && d.fromClassId != null
+          && (isOwner(classDoc(d.fromClassId).ownerId) || isSchoolAdmin(classDoc(d.fromClassId).get('schoolId', null)));
+      }
+      allow read: if isOwner(uid) || isOwner(resource.data.assignedBy);
+      allow create, update: if isOwner(request.resource.data.assignedBy)
+        && (canMove(request.resource.data) || canRemove(request.resource.data));
+      allow delete: if resource == null || isOwner(uid) || isOwner(resource.data.assignedBy);
+    }
+
+    // A student's request to move tier, reviewed by their linked teacher.
+    match /levelRequests/{uid} {
+      allow read: if isOwner(uid) || isOwner(resource.data.teacherId);
+      allow create: if isOwner(uid)
+        && request.resource.data.uid == uid
+        && request.resource.data.status == 'pending'
+        && request.resource.data.teacherId == get(/databases/$(database)/documents/users/$(uid)).data.school.teacherId;
+      allow update: if isOwner(resource.data.teacherId)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'reviewedAt'])
+        && request.resource.data.status in ['approved', 'rejected'];
+      allow delete: if resource == null || isOwner(uid);
+    }
+
+    // Each InnovationPortfolio is a single nested document owned by one student,
+    // readable by the student's current teacher and school admin.
+    match /portfolios/{id} {
+      allow read: if isOwner(resource.data.ownerId)
+        || isOwner(resource.data.get('teacherId', null))
+        || isSchoolAdmin(resource.data.get('schoolId', null));
+      allow delete: if isOwner(resource.data.ownerId);
+      allow create: if isOwner(request.resource.data.ownerId);
+      allow update: if isOwner(resource.data.ownerId)
+        && request.resource.data.ownerId == resource.data.ownerId;
+    }
+
+    match /classes/{classId} {
+      function staffOfClass() {
+        return isOwner(classDoc(classId).ownerId) || isSchoolAdmin(classDoc(classId).get('schoolId', null));
+      }
+      allow read: if isOwner(resource.data.ownerId) || isSchoolAdmin(resource.data.get('schoolId', null));
+      allow delete: if isOwner(resource.data.ownerId);
+      allow create: if isOwner(request.resource.data.ownerId)
+        && request.resource.data.get('schoolId', null) == me().get('schoolId', null);
+      allow update: if isOwner(resource.data.ownerId)
+        && request.resource.data.ownerId == resource.data.ownerId
+        && request.resource.data.get('schoolId', null) == resource.data.get('schoolId', null);
+
+      match /outputs/{outputId} {
+        allow read, write: if isOwner(classDoc(classId).ownerId);
+      }
+
+      // Roster rows: each student keeps their own row current; staff read and can remove.
+      match /members/{uid} {
+        allow read: if isOwner(uid) || staffOfClass();
+        allow create, update: if isOwner(uid) && request.resource.data.uid == uid;
+        allow delete: if isOwner(uid) || staffOfClass();
+      }
+
+      // Private staff notes about a student; students cannot read them.
+      match /notes/{uid} {
+        allow read, write: if staffOfClass();
+      }
+    }
+
+    // 6-digit class codes: any signed-in user may look one up; only the teacher can create/delete it.
+    match /joinCodes/{code} {
+      allow get: if signedIn();
+      allow list: if false;
+      allow create: if isOwner(request.resource.data.teacherId)
+        && code.matches('^[0-9]{6}$')
+        && request.resource.data.code == code;
+      allow update: if false;
+      allow delete: if isOwner(resource.data.teacherId);
+    }
+
+    // A teacher's school materials; readable by linked students for material substitution.
+    match /resourceBanks/{ownerId} {
+      allow read: if signedIn();
+      allow write: if isOwner(ownerId) && request.resource.data.ownerId == ownerId;
+    }
+
+    // Published by admins via the console / Admin SDK.
+    match /challenges/{id} {
+      allow read: if signedIn();
+      allow write: if false;
+    }
+
+    // Curated real-world problems, published by admins via the console.
+    match /communityProblems/{id} {
+      allow read: if signedIn();
+      allow write: if false;
+    }
+
+    // Problems a teacher posts for their own students.
+    match /schoolProblems/{teacherId}/problems/{id} {
+      allow read: if signedIn();
+      allow create: if isOwner(teacherId)
+        && request.resource.data.teacherId == teacherId
+        && request.resource.data.title is string && request.resource.data.title.size() <= 120
+        && request.resource.data.description is string && request.resource.data.description.size() <= 600;
+      allow update: if false;
+      allow delete: if isOwner(teacherId);
+    }
+
+    // Student work is only public once the linked teacher approves it.
+    match /galleryItems/{id} {
+      function linkedTeacher() {
+        return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.school.teacherId;
+      }
+      allow read: if signedIn() && (
+        resource.data.status == 'approved'
+        || resource.data.ownerId == request.auth.uid
+        || resource.data.teacherId == request.auth.uid);
+      allow create: if signedIn()
+        && request.resource.data.ownerId == request.auth.uid
+        && request.resource.data.status == 'pending'
+        && request.resource.data.teacherId == linkedTeacher()
+        && get(/databases/$(database)/documents/portfolios/$(id)).data.ownerId == request.auth.uid;
+      // Teachers may only change the review fields.
+      allow update: if isOwner(resource.data.teacherId)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'reviewedAt'])
+        && request.resource.data.status in ['approved', 'rejected'];
+      allow delete: if resource == null || isOwner(resource.data.ownerId);
+
+      // Preset reactions only; one per user, on approved items.
+      match /reactions/{uid} {
+        allow read: if signedIn();
+        allow create, update: if isOwner(uid)
+          && request.resource.data.reaction in ['great-idea', 'love-prototype', 'brave-testing', 'want-to-try']
+          && get(/databases/$(database)/documents/galleryItems/$(id)).data.status == 'approved';
+        allow delete: if isOwner(uid);
+      }
+    }
+  }
+}

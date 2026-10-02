@@ -1,0 +1,71 @@
+{
+  "expo": {
+    "name": "GIS Young Innovators",
+    "slug": "gis-young-innovators",
+    "scheme": "gisyounginnovators",
+    "version": "1.0.0",
+    "plugins": [
+      "expo-router",
+      "expo-sharing",
+      "@react-native-firebase/app",
+      "@react-native-firebase/app-check",
+      "@react-native-firebase/auth",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow GIS Young Innovators to use your photos so you can add pictures of your drawings and sketches.",
+          "cameraPermission": "Allow GIS Young Innovators to use the camera so you can photograph your drawings and sketches."
+        }
+      ],
+      [
+        "expo-speech-recognition",
+        {
+          "microphonePermission": "Allow GIS Young Innovators to use the microphone so you can speak your answers instead of typing.",
+          "speechRecognitionPermission": "Allow GIS Young Innovators to turn your speech into text for your project.",
+          "androidSpeechServicePackages": ["com.google.android.googlequicksearchbox", "com.google.android.tts"]
+        }
+      ],
+      [
+        "expo-build-properties",
+        {
+          "ios": {
+            "useFrameworks": "dynamic"
+          }
+        }
+      ],
+      "expo-speech-recognition"
+    ],
+    "experiments": {
+      "typedRoutes": false
+    },
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.gisyounginnovators.app",
+      "googleServicesFile": "./GoogleService-Info.plist"
+    },
+    "android": {
+      "package": "com.gisyounginnovators.app",
+      "googleServicesFile": "./google-services.json",
+      "adaptiveIcon": {
+        "backgroundColor": "#E6F4FE",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "bundler": "metro",
+      "favicon": "./assets/favicon.png"
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "4ba8f1d5-ee6e-4dc2-a861-eeb4c0720b8b"
+      }
+    }
+  }
+}
